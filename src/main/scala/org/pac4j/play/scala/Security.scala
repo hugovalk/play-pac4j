@@ -105,6 +105,32 @@ trait Security[P<:CommonProfile] extends Controller {
     )
   }
 
+  protected def SecureAction[A](clients: String, authorizers: String) = new ActionRefiner[UserProfileRequest, UserProfileRequest] {
+
+    override def refine[A](request: UserProfileRequest) = Future.successful {
+      val webContext = new PlayWebContext(request, config.getSessionStore)
+      val requiresAuthenticationAction = new RequiresAuthenticationAction(config)
+      val javaContext = webContext.getJavaContext
+      requiresAuthenticationAction.internalCall(javaContext, clients, authorizers).wrapped().flatMap[play.api.mvc.Result](r =>
+        if (r == null) {
+          var profile = javaContext.args.get(Pac4jConstants.USER_PROFILE).asInstanceOf[P]
+          if (profile == null) {
+            request.userProfile match {
+              case Some(p) => profile = p
+              case _ =>  // do nothing
+            }
+          }
+          request
+        } else {
+          Future {
+            JavaHelpers.createResult(javaContext, r)
+          }
+        }
+      )
+    }
+
+  }
+
   /**
    * Return the current user profile.
    *
@@ -117,3 +143,62 @@ trait Security[P<:CommonProfile] extends Controller {
     Option(profileManager.get(true))
   }
 }
+
+case class Secure[A, P<:CommonProfile](clients: String = "", authorizers: String = "", (action: Action[A]) extends Action[A] {
+
+  @Inject
+  protected var config: Config = null
+
+  def apply(request: Request[A]): Future[Result] = {
+    val webContext = new PlayWebContext(request, config.getSessionStore)
+    val requiresAuthenticationAction = new RequiresAuthenticationAction(config)
+    val javaContext = webContext.getJavaContext
+    requiresAuthenticationAction.internalCall(javaContext, clients, authorizers).wrapped().flatMap[play.api.mvc.Result](r =>
+      if (r == null) {
+        var profile = javaContext.args.get(Pac4jConstants.USER_PROFILE).asInstanceOf[P]
+        if (profile == null) {
+          getUserProfile(request) match {
+            case Some(p) => profile = p
+            case _ =>  // do nothing
+          }
+        }
+        action(request)
+      } else {
+        Future {
+          JavaHelpers.createResult(javaContext, r)
+        }
+      }
+    )
+    action(request)
+  }
+
+  lazy val parser = action.parser
+
+}
+
+class UserProfileRequest[A](val userProfile: Option[CommonProfile], request: Request[A]) extends WrappedRequest[A](request))
+
+object UserProfileAction extends ActionBuilder[UserProfileRequest]
+  with ActionTransformer[Request,UserProfileRequest] {
+
+  @Inject
+  protected var config: Config = null
+
+  override protected def transform[A](request: Request[A]): Future[UserProfileRequest[A]] = {
+    new UserProfileRequest(getUserProfile[CommonProfile](request), request)
+  }
+
+  /**
+    * Return the current user profile.
+    *
+    * @param request
+    * @return the user profile
+    */
+  protected def getUserProfile[P <: CommonProfile](implicit request: RequestHeader): Option[P] = {
+    val webContext = new PlayWebContext(request, config.getSessionStore)
+    val profileManager = new ProfileManager[P](webContext)
+    Option(profileManager.get(true))
+  }
+}
+
+
